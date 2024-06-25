@@ -1,25 +1,61 @@
+/* MQTT (over TCP) Example
+
+   This example code is in the Public Domain (or CC0 licensed, at your option.)
+
+   Unless required by applicable law or agreed to in writing, this
+   software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+   CONDITIONS OF ANY KIND, either express or implied.
+*/
+
 #include <stdio.h>
-#include <stdint.h>
-#include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
+
 #include "esp_wifi.h"
 #include "esp_system.h"
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "protocol_examples_common.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "freertos/queue.h"
-#include "lwip/sockets.h"
-#include "lwip/dns.h"
-#include "lwip/netdb.h"
+#include "freertos/event_groups.h"
+
 #include "esp_log.h"
 #include "mqtt_client.h"
 #include "dht11.h"
+#include "driver/adc.h"
+#include "esp_mac.h"
+
+#include "driver/i2c.h"
+#include "ssd1306.h"
 
 static const char *TAG = "mqtt_example";
+#define USER_SSID "RFThings Vietnam"
+#define USER_PASSWORD "khongvaoduoc!"
+
+#define I2C_MASTTER_NUM 0
+
+#define I2C_MASTER_SCL_IO 3                              /*!< gpio number for I2C master clock */
+#define I2C_MASTER_SDA_IO 2                                /*!< gpio number for I2C master data  */
+#define I2C_MASTER_NUM I2C_NUMBER(CONFIG_I2C_MASTER_PORT_NUM) /*!< I2C port number for master dev */
+#define I2C_MASTER_FREQ_HZ 100000                             /*!< I2C master clock frequency */
+#define I2C_MASTER_TX_BUF_DISABLE 0                           /*!< I2C master doesn't need buffer */
+#define I2C_MASTER_RX_BUF_DISABLE 0                           /*!< I2C master doesn't need buffer */
+
+#define AUTO_SELECT -1
+
+// #define RAIN_PIN ADC1_CHANNEL_6
+// #define MAX_RAIN_RAW_VALUE 4095
+// #define MAX_RAIN_LEVEL 4
+#define LINE_1 0
+#define LINE_2 1
+#define LINE_3 2
+
 #define MQTT_BROKER_URI "mqtt://mqtt.flespi.io"
 #define MQTT_BROKER_PORT 1883
 #define MQTT_BROKER_USERNAME "hds7ZvnDXPNfUMKKOh7mZmOwOP5RAvgIywDlRPOCupFe2fNEnIPcUrwx6pevKk36"
@@ -28,7 +64,6 @@ static const char *TAG = "mqtt_example";
 #define TOPIC_1 "TEST1"
 
 esp_mqtt_client_handle_t client;
-
 static void log_error_if_nonzero(const char *message, int error_code)
 {
     if (error_code != 0) {
@@ -36,17 +71,86 @@ static void log_error_if_nonzero(const char *message, int error_code)
     }
 }
 
+int retry_num=0;
+float temperature, humidity;
+int humid = 0;
+char topic1[50] = "MiniProject/Sensor";
+char deviceName[20] = "SensorNode-2";
+char data[256];
+int qos = 1;
+
+static void wifi_event_handler(void *event_handler_arg, esp_event_base_t event_base, int32_t event_id,void *event_data){
+if(event_id == WIFI_EVENT_STA_START)
+{
+  printf("WIFI CONNECTING....\n");
+}
+else if (event_id == WIFI_EVENT_STA_CONNECTED)
+{
+  printf("WiFi CONNECTED\n");
+}
+else if (event_id == WIFI_EVENT_STA_DISCONNECTED)
+{
+  printf("WiFi lost connection\n");
+  if(retry_num<5){esp_wifi_connect();retry_num++;printf("Retrying to Connect...\n");}
+  else
+  {
+
+  }
+}
+else if (event_id == IP_EVENT_STA_GOT_IP)
+{
+  printf("Wifi got IP...\n\n");
+}
+}
+
+void wifi_connection()
+{
+     //                          s1.4
+    // 2 - Wi-Fi Configuration Phase
+    esp_netif_init();
+    esp_event_loop_create_default();     // event loop                    s1.2
+    esp_netif_create_default_wifi_sta(); // WiFi station                      s1.3
+    wifi_init_config_t wifi_initiation = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&wifi_initiation); //     
+    esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL);
+    esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL);
+    //esp_event_handler_register(SC_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL);
+    wifi_config_t wifi_configuration = {
+        .sta = {
+            .ssid = USER_SSID,
+            .password = USER_PASSWORD
+            }
+        };
+    esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_configuration);
+    // 3 - Wi-Fi Start Phase
+    esp_wifi_start();
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    // 4- Wi-Fi Connect Phase
+    esp_wifi_connect();
+    printf( "wifi_init_softap finished. SSID:%s  password:%s",USER_SSID,USER_PASSWORD);
+    
+}
+
+/*
+ * @brief Event handler registered to receive MQTT events
+ *
+ *  This function is called by the MQTT client event loop.
+ *
+ * @param handler_args user data registered to the event.
+ * @param base Event base for the handler(always MQTT Base in this example).
+ * @param event_id The id for the received event.
+ * @param event_data The data for the event, esp_mqtt_event_handle_t.
+ */
+esp_mqtt_event_handle_t event;
+esp_mqtt_client_handle_t client;
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
 {
     ESP_LOGD(TAG, "Event dispatched from event loop base=%s, event_id=%" PRIi32 "", base, event_id);
-    esp_mqtt_event_handle_t event = event_data;
-    esp_mqtt_client_handle_t client = event->client;
-    int msg_id;
+    event = event_data;
+    client = event->client;
     switch ((esp_mqtt_event_id_t)event_id) {
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
-        msg_id = esp_mqtt_client_publish(client, TOPIC_1, "Hello", 0, 1, 0);
-        ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
         break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
@@ -54,8 +158,6 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
     case MQTT_EVENT_SUBSCRIBED:
         ESP_LOGI(TAG, "MQTT_EVENT_SUBSCRIBED, msg_id=%d", event->msg_id);
-        msg_id = esp_mqtt_client_publish(client, "/topic/qos0", "data", 0, 0, 0);
-        ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
         break;
     case MQTT_EVENT_UNSUBSCRIBED:
         ESP_LOGI(TAG, "MQTT_EVENT_UNSUBSCRIBED, msg_id=%d", event->msg_id);
@@ -73,8 +175,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         if (event->error_handle->error_type == MQTT_ERROR_TYPE_TCP_TRANSPORT) {
             log_error_if_nonzero("reported from esp-tls", event->error_handle->esp_tls_last_esp_err);
             log_error_if_nonzero("reported from tls stack", event->error_handle->esp_tls_stack_err);
-            log_error_if_nonzero("captured as transport's socket errno", event->error_handle->esp_transport_sock_errno);
+            log_error_if_nonzero("captured as transport's socket errno",  event->error_handle->esp_transport_sock_errno);
             ESP_LOGI(TAG, "Last errno string (%s)", strerror(event->error_handle->esp_transport_sock_errno));
+
         }
         break;
     default:
@@ -97,24 +200,26 @@ static void mqtt_app_start(void)
     esp_mqtt_client_start(client);
 }
 
-void dht11_task(void *pvParameter)
+static esp_err_t i2c_master_init(void)
 {
-    double temperature = 0.0;
-    double humidity = 0.0;
-    char payload[100];
+    int i2c_master_port = I2C_MASTTER_NUM;
+    i2c_config_t conf = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = I2C_MASTER_SDA_IO,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_io_num = I2C_MASTER_SCL_IO,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = I2C_MASTER_FREQ_HZ,
+        .clk_flags = 0,          /*!< Optional, you can use I2C_SCLK_SRC_FLAG_* flags to choose i2c source clock here. */
+    };
 
-    while (1) {
-        if (dht_read_data(GPIO_NUM_4, &humidity, &temperature)) {
-            ESP_LOGI(TAG, "Temperature: %.1f°C, Humidity: %.1f%%", temperature, humidity);
-            
-            snprintf(payload, sizeof(payload), "{\"temperature\":%.1f,\"humidity\":%.1f}", temperature, humidity);
-            esp_mqtt_client_publish(client, TOPIC_1, payload, 0, 1, 0);
-        } else {
-            ESP_LOGE(TAG, "Failed to read data from DHT11 sensor");
-        }
-        vTaskDelay(pdMS_TO_TICKS(10000)); // Delay 10 seconds
+    esp_err_t err = i2c_param_config(i2c_master_port, &conf);
+    if (err != ESP_OK) {
+        return err;
     }
+    return i2c_driver_install(i2c_master_port, conf.mode, I2C_MASTER_RX_BUF_DISABLE, I2C_MASTER_TX_BUF_DISABLE, 0);
 }
+
 
 void app_main(void)
 {
@@ -130,14 +235,52 @@ void app_main(void)
     esp_log_level_set("transport", ESP_LOG_VERBOSE);
     esp_log_level_set("outbox", ESP_LOG_VERBOSE);
 
-    ESP_ERROR_CHECK(nvs_flash_init());
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        // NVS partition was truncated and needs to be erased
+        // Retry nvs_flash_init
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK( err );
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    ESP_ERROR_CHECK(example_connect());
+    ESP_ERROR_CHECK(i2c_master_init());
+    DHT11_init(GPIO_NUM_8);
+    ssd1306_init();
+    task_ssd1306_display_clear();
+    ESP_LOGI(SSD_TAG, "Oled init");
+    
+    wifi_connection();
 
     mqtt_app_start();
+    // // gpio_set_direction(DHT22_PIN, GPIO_MODE_INPUT);
 
-    xTaskCreate(&dht11_task, "dht11_task", 2048, NULL, 5, NULL);
+    // adc1_config_width(ADC_WIDTH_BIT_12);
+    // adc1_config_channel_atten(RAIN_PIN, ADC_ATTEN_DB_11);
+    while (1)
+    {
+        printf("Status code is %d\n", DHT11_read().status);
+        while (DHT11_read().status != DHT11_OK)
+        {
+            vTaskDelay(1000 / portTICK_PERIOD_MS);
+        }
+        temperature = DHT11_read().temperature;
+        humidity = DHT11_read().humidity;
+        printf("Temperature is %f \n", temperature);
+        printf("Humidity is %f\n", humidity);
+        humid = (int)humidity;
+        char str[50];
+        sprintf(str, "temp:%.1f'C\nhumid:%.1f%%", 
+        temperature, humidity);
+        task_ssd1306_display_clear();
+        task_ssd1306_display_text_at_line(str, LINE_1);
+
+        snprintf(data, sizeof(data), "%d%%, %.1f°C", humid, temperature);
+
+        esp_mqtt_client_publish(client, TOPIC_1, data, sizeof(data), qos, 0);
+
+        vTaskDelay(10000 / portTICK_PERIOD_MS);
+    }
 }
-``
