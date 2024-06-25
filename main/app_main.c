@@ -74,7 +74,6 @@ static void log_error_if_nonzero(const char *message, int error_code)
 int retry_num=0;
 float temperature, humidity;
 int humid = 0;
-char topic1[50] = "MiniProject/Sensor";
 char deviceName[20] = "SensorNode-2";
 char data[256];
 int qos = 1;
@@ -92,11 +91,6 @@ else if (event_id == WIFI_EVENT_STA_DISCONNECTED)
 {
   printf("WiFi lost connection\n");
   if(retry_num<5){esp_wifi_connect();retry_num++;printf("Retrying to Connect...\n");}
-  else
-  {
-
-  }
-}
 else if (event_id == IP_EVENT_STA_GOT_IP)
 {
   printf("Wifi got IP...\n\n");
@@ -105,8 +99,6 @@ else if (event_id == IP_EVENT_STA_GOT_IP)
 
 void wifi_connection()
 {
-     //                          s1.4
-    // 2 - Wi-Fi Configuration Phase
     esp_netif_init();
     esp_event_loop_create_default();     // event loop                    s1.2
     esp_netif_create_default_wifi_sta(); // WiFi station                      s1.3
@@ -114,7 +106,6 @@ void wifi_connection()
     esp_wifi_init(&wifi_initiation); //     
     esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL);
     esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL);
-    //esp_event_handler_register(SC_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL);
     wifi_config_t wifi_configuration = {
         .sta = {
             .ssid = USER_SSID,
@@ -177,7 +168,6 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             log_error_if_nonzero("reported from tls stack", event->error_handle->esp_tls_stack_err);
             log_error_if_nonzero("captured as transport's socket errno",  event->error_handle->esp_transport_sock_errno);
             ESP_LOGI(TAG, "Last errno string (%s)", strerror(event->error_handle->esp_transport_sock_errno));
-
         }
         break;
     default:
@@ -255,10 +245,6 @@ void app_main(void)
     wifi_connection();
 
     mqtt_app_start();
-    // // gpio_set_direction(DHT22_PIN, GPIO_MODE_INPUT);
-
-    // adc1_config_width(ADC_WIDTH_BIT_12);
-    // adc1_config_channel_atten(RAIN_PIN, ADC_ATTEN_DB_11);
     while (1)
     {
         printf("Status code is %d\n", DHT11_read().status);
